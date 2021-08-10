@@ -1,6 +1,6 @@
 DESTDIR ?= ${HOME}/Boost/
-SOURCE1 = client.cpp
-SOURCE2 = server.cpp
+SOURCE1 = udp_client.cpp
+SOURCE2 = udp_server.cpp
 
 all: server client
 

@@ -7,8 +7,16 @@
 #include <boost/enable_shared_from_this.hpp>
 #include <boost/bind/bind.hpp>
 #include <boost/program_options.hpp>
+#include <boost/function.hpp>
 #include <stdexcept>
+
 #include "includes.h"
+
+#if BOOST_VERSION >= 107000
+#define GET_IO_SERVICE(s) ((boost::asio::io_context&)(s).get_executor().context())
+#else
+#define GET_IO_SERVICE(s) ((s).get_io_service())
+#endif
 
 using namespace boost::asio;
 using ip::udp;
@@ -21,18 +29,21 @@ private:
     enum { max_length = sizeof(CalcData) };
     unData data_;
     boost::asio::ip::udp::endpoint sender_endpoint_;
+    boost::shared_ptr<udp::socket> io_sock_;
 public:
     typedef boost::shared_ptr<con_handler> pointer;
 
-    con_handler() = default;
+    con_handler(boost::shared_ptr<udp::socket> io_sock)
+    :io_sock_(io_sock){
+    }
 
     con_handler(const con_handler&) = delete;
     con_handler(con_handler&&) = delete;
     ~con_handler() = default;
 
-    static pointer create()
+    static pointer create(boost::shared_ptr<udp::socket> io_sock)
     {
-        return pointer(new con_handler());
+        return pointer(new con_handler(io_sock));
     }
 
     void handle_write(const boost::system::error_code& err, size_t bytes_transferred)
@@ -43,41 +54,17 @@ public:
             std::cout << "Processing & data send operation both are over." << std::endl;
         }
     }
-    friend class Server;
-};
 
-class Server
-{
-private:
-   udp::socket io_sock_;
-   void start_accept()
-   {
-    // socket
-
-    con_handler::pointer connection = con_handler::create();
-
-    io_sock_.async_receive_from(boost::asio::buffer(&connection->data_.args, sizeof(connection->data_.args)),
-                               connection->sender_endpoint_,
-                            [this, connection](const boost::system::error_code& error, std::size_t bytes_transferred) {
-                                handle_receive(connection, bytes_transferred, error);
-                            });
-  }
-
-public:
-//constructor for accepting connection from client
-    Server(boost::asio::io_service& io_service, const std::string &addr, const std::uint16_t port)
-    : io_sock_(io_service, boost::asio::ip::udp::endpoint(boost::asio::ip::make_address(addr.c_str()), port))
-    {
-        start_accept();
-    }
-    void handle_receive(con_handler::pointer connection,
-                        std::size_t bytes_transferred,
-                        const boost::system::error_code& err)
+    static void handle_receive(con_handler::pointer connection,
+                               boost::function<void ()> f,
+                               std::size_t bytes_transferred,
+                               const boost::system::error_code& err)
     {
         if (err) {
             std::cerr << "error: " << err.message() << std::endl;
             return;
         }
+        f();
         auto& data = connection->data_;
         std::cout << "[" << bytes_transferred << "] bytes have been received" << std::endl;
         double r = std::numeric_limits<double>::quiet_NaN();
@@ -99,14 +86,49 @@ public:
 
         data.res.res = r;
 
-        io_sock_.async_send_to(boost::asio::buffer(&data.res, sizeof(data.res)),
+        connection->io_sock_->async_send_to(boost::asio::buffer(&data.res, sizeof(data.res)),
                                connection->sender_endpoint_,
                             [connection](const boost::system::error_code& error,
                                     std::size_t bytes_transferred) {
                                 connection->handle_write(error, bytes_transferred);
                             });
+
+    }
+
+    void run(boost::function<void ()> f) {
+        auto p = shared_from_this();
+        io_sock_->async_receive_from(boost::asio::buffer(&data_.args, sizeof(data_.args)),
+                                     sender_endpoint_,
+                                     [p, f](const boost::system::error_code& error,
+                                         std::size_t bytes_transferred) {
+                                         handle_receive(p, f, bytes_transferred, error);
+                                     });
+    }
+};
+
+class Server
+{
+private:
+    boost::shared_ptr<udp::socket> io_sock_;
+
+    void start_accept()
+    {
+        con_handler::pointer connection = con_handler::create(io_sock_);
+        connection->run([this]() {
+            start_accept();
+        });
+    }
+
+public:
+//constructor for accepting connection from client
+    Server(boost::asio::io_service& io_service, const std::string &addr, const std::uint16_t port)
+    : io_sock_(new udp::socket(io_service,
+                               boost::asio::ip::udp::endpoint(boost::asio::ip::make_address(addr.c_str()),
+                                                              port)))
+    {
         start_accept();
     }
+
 };
 
 int main(int argc, char *argv[])
